@@ -3,7 +3,7 @@
 #include <ctime>                //时间的头文件
 #include <stdexcept>            //异常处理头文件
 
-#define DICT_PATH "/home/liko/netcode/dictionary/dicserver/src/dict.txt" // 单词文本的文件路径
+#define DICT_PATH "/home/liko/桌面/dictionary/dictionary_system/dicserver/src/dict.txt" // 单词文本的文件路径
 using namespace std;
 /*
     构造函数：打开数据库连接
@@ -54,20 +54,58 @@ bool DatabaseManager::initializeUserDB()
     lock_guard<mutex> lock(usr_mutex_);
 
     // 准备sql语句：创建用户表和历史记录表的sql语句
-    const char *sql = "create table if not exists usr("     // 创建用户表
-                      "name text primary key,"              // 用户名（主键）
-                      "passwd int,"                         // 密码
-                      "stage int);"                         // 用户状态：0表示离线   1表示在线
-                      "create table if not exists history(" // 创建历史记录表
-                      "name text,"                          // 用户名
-                      "word text,"                          // 查询的单词
-                      "mean text,"                          // 单词意思
-                      "time text);";                        // 查询时间
+    const char *sql = "create table if not exists usr("
+                      "name text primary key,"
+                      "passwd int,"
+                      "stage int,"
+                      "exp int default 0,"
+                      "level int default 1);"
+                      "create table if not exists history("
+                      "name text,"
+                      "word text,"
+                      "mean text,"
+                      "time text,"
+                      "mastery int default 0);";
 
     // 执行sql语句
     if (!executeSQL(usr_db_, sql))
     {
         cerr << "用户数据表初始化失败" << endl;
+        return false;
+    }
+
+    if (!ensureColumnExists(usr_db_, "usr", "exp", "alter table usr add column exp int default 0;"))
+    {
+        cerr << "usr表exp字段升级失败" << endl;
+        return false;
+    }
+    if (!ensureColumnExists(usr_db_, "usr", "level", "alter table usr add column level int default 1;"))
+    {
+        cerr << "usr表level字段升级失败" << endl;
+        return false;
+    }
+    if (!ensureColumnExists(usr_db_, "history", "mastery", "alter table history add column mastery int default 0;"))
+    {
+        cerr << "history表mastery字段升级失败" << endl;
+        return false;
+    }
+
+    sql = "update usr set exp=0 where exp is null;";
+    if (!executeSQL(usr_db_, sql))
+    {
+        cerr << "usr表exp默认值补全失败" << endl;
+        return false;
+    }
+    sql = "update usr set level=1 where level is null;";
+    if (!executeSQL(usr_db_, sql))
+    {
+        cerr << "usr表level默认值补全失败" << endl;
+        return false;
+    }
+    sql = "update history set mastery=0 where mastery is null;";
+    if (!executeSQL(usr_db_, sql))
+    {
+        cerr << "history表mastery默认值补全失败" << endl;
         return false;
     }
 
@@ -211,15 +249,47 @@ bool DatabaseManager::dictToDatabase()
 */
 bool DatabaseManager::executeSQL(sqlite3 *db, const string &sql, char **errmsg)
 {
-    if (sqlite3_exec(db, sql.c_str(), NULL, NULL, errmsg) != SQLITE_OK)
+    char *local_errmsg = NULL;
+    char **err_ptr = errmsg ? errmsg : &local_errmsg;
+    if (sqlite3_exec(db, sql.c_str(), NULL, NULL, err_ptr) != SQLITE_OK)
     {
-        cerr << "sql执行失败：" << *errmsg << endl;
-        // 释放错误信息空间
-        sqlite3_free(errmsg);
+        if (err_ptr && *err_ptr)
+        {
+            cerr << "sql执行失败：" << *err_ptr << endl;
+            sqlite3_free(*err_ptr);
+        }
         return false;
     }
 
     return true; // 表示正常执行了sql语句
+}
+
+bool DatabaseManager::ensureColumnExists(sqlite3 *db, const string &table, const string &column, const string &ddl)
+{
+    string sql = "pragma table_info(" + table + ");";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, NULL) != SQLITE_OK)
+    {
+        cerr << "sql准备失败" << sqlite3_errmsg(db) << endl;
+        return false;
+    }
+
+    bool exists = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW)
+    {
+        const unsigned char *col_name = sqlite3_column_text(stmt, 1);
+        if (col_name && column == reinterpret_cast<const char *>(col_name))
+        {
+            exists = true;
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    if (exists)
+        return true;
+
+    return executeSQL(db, ddl);
 }
 
 /*
@@ -234,13 +304,13 @@ bool DatabaseManager::registerUser(const string &name, const string &password)
     lock_guard<mutex> lock(usr_mutex_);
 
     // 准备sql语句 : ?表示通配符，用于后面的绑定，0表示默认注册时，所有用户都是离线状态
-    const char *sql = "insert into usr values(?,?,0);";
+    const char *sql = "insert into usr(name,passwd,stage,exp,level) values(?,?,0,0,1);";
 
     // 预编译sql语句
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(usr_db_, sql, -1, &stmt, NULL) != SQLITE_OK)
     {
-        cerr << "sql准备失败" << sqlite3_errmsg(dict_db_) << endl;
+        cerr << "sql准备失败" << sqlite3_errmsg(usr_db_) << endl;
         return false;
     }
 
@@ -281,7 +351,7 @@ bool DatabaseManager::loginUser(const string &name, const string &password, bool
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(usr_db_, sql, -1, &stmt, NULL) != SQLITE_OK)
     {
-        cerr << "sql准备失败" << sqlite3_errmsg(dict_db_) << endl;
+        cerr << "sql准备失败" << sqlite3_errmsg(usr_db_) << endl;
         return false;
     }
 
@@ -335,7 +405,7 @@ bool DatabaseManager::logoutUser(const string &name)
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(usr_db_, sql, -1, &stmt, NULL) != SQLITE_OK)
     {
-        cerr << "sql准备失败" << sqlite3_errmsg(dict_db_) << endl;
+        cerr << "sql准备失败" << sqlite3_errmsg(usr_db_) << endl;
         return false;
     }
 
@@ -404,7 +474,7 @@ bool DatabaseManager::recordHistory(const string &name, const string &word, cons
     lock_guard<mutex> lock(usr_mutex_);
 
     // 准备失去了语句
-    const char *sql = "insert into history values(?,?,?,?);";
+    const char *sql = "insert into history(name,word,mean,time,mastery) values(?,?,?,?,0);";
     // 预编译sql语句
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(usr_db_, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -469,4 +539,196 @@ bool DatabaseManager::getHistory(const string name, string &history)
 
     sqlite3_finalize(stmt);
     return true;
+}
+
+bool DatabaseManager::isWordMastered(const string &name, const string &word, bool &mastered)
+{
+    lock_guard<mutex> lock(usr_mutex_);
+
+    const char *sql = "select 1 from history where name=? and word=? and mastery=1 limit 1;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(usr_db_, sql, -1, &stmt, NULL) != SQLITE_OK)
+    {
+        cerr << "sql准备失败" << sqlite3_errmsg(usr_db_) << endl;
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, word.c_str(), -1, SQLITE_STATIC);
+
+    mastered = (sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool DatabaseManager::setWordMastery(const string &name, const string &word, int mastery)
+{
+    lock_guard<mutex> lock(usr_mutex_);
+
+    const char *sql = "update history set mastery=? where name=? and word=?;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(usr_db_, sql, -1, &stmt, NULL) != SQLITE_OK)
+    {
+        cerr << "sql准备失败" << sqlite3_errmsg(usr_db_) << endl;
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, mastery);
+    sqlite3_bind_text(stmt, 2, name.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, word.c_str(), -1, SQLITE_STATIC);
+
+    int result = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return result == SQLITE_DONE;
+}
+
+bool DatabaseManager::getPetInfo(const string &name, int &level, int &exp)
+{
+    lock_guard<mutex> lock(usr_mutex_);
+
+    const char *sql = "select level,exp from usr where name=?;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(usr_db_, sql, -1, &stmt, NULL) != SQLITE_OK)
+    {
+        cerr << "sql准备失败" << sqlite3_errmsg(usr_db_) << endl;
+        return false;
+    }
+    sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_STATIC);
+
+    bool ok = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+    {
+        level = sqlite3_column_int(stmt, 0);
+        exp = sqlite3_column_int(stmt, 1);
+        ok = true;
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool DatabaseManager::getLearnWord(const string &name, string &word, string &meaning)
+{
+    word.clear();
+    meaning.clear();
+
+    {
+        lock_guard<mutex> lock(usr_mutex_);
+
+        const char *sql =
+            "select word,mean "
+            "from history "
+            "where name=? "
+            "group by word "
+            "having max(mastery)=0 "
+            "order by max(time) desc "
+            "limit 1;";
+
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(usr_db_, sql, -1, &stmt, NULL) != SQLITE_OK)
+        {
+            cerr << "sql准备失败" << sqlite3_errmsg(usr_db_) << endl;
+            return false;
+        }
+
+        sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_STATIC);
+        bool found = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            const unsigned char *w = sqlite3_column_text(stmt, 0);
+            const unsigned char *m = sqlite3_column_text(stmt, 1);
+            if (w)
+            {
+                word = reinterpret_cast<const char *>(w);
+                if (m)
+                {
+                    meaning = reinterpret_cast<const char *>(m);
+                }
+                found = true;
+            }
+        }
+        sqlite3_finalize(stmt);
+        if (found)
+        {
+            if (meaning.empty())
+            {
+                querryWord(word, meaning);
+            }
+            return true;
+        }
+    }
+
+    {
+        lock_guard<mutex> lock(dict_mutex_);
+
+        const char *sql = "select word,mean from dict order by random() limit 1;";
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(dict_db_, sql, -1, &stmt, NULL) != SQLITE_OK)
+        {
+            cerr << "sql准备失败" << sqlite3_errmsg(dict_db_) << endl;
+            return false;
+        }
+
+        bool ok = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            const unsigned char *w = sqlite3_column_text(stmt, 0);
+            const unsigned char *m = sqlite3_column_text(stmt, 1);
+            if (w && m)
+            {
+                word = reinterpret_cast<const char *>(w);
+                meaning = reinterpret_cast<const char *>(m);
+                ok = true;
+            }
+        }
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+}
+
+bool DatabaseManager::addUserExpAndLevel(const string &name, int exp_gain, int &level, int &exp, bool &level_up)
+{
+    lock_guard<mutex> lock(usr_mutex_);
+
+    const char *select_sql = "select level,exp from usr where name=?;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(usr_db_, select_sql, -1, &stmt, NULL) != SQLITE_OK)
+    {
+        cerr << "sql准备失败" << sqlite3_errmsg(usr_db_) << endl;
+        return false;
+    }
+    sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) != SQLITE_ROW)
+    {
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    level = sqlite3_column_int(stmt, 0);
+    exp = sqlite3_column_int(stmt, 1);
+    sqlite3_finalize(stmt);
+
+    exp += exp_gain;
+    level_up = false;
+    while (level > 0 && exp >= level * 100)
+    {
+        exp -= level * 100;
+        level += 1;
+        level_up = true;
+    }
+
+    const char *update_sql = "update usr set level=?, exp=? where name=?;";
+    if (sqlite3_prepare_v2(usr_db_, update_sql, -1, &stmt, NULL) != SQLITE_OK)
+    {
+        cerr << "sql准备失败" << sqlite3_errmsg(usr_db_) << endl;
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, level);
+    sqlite3_bind_int(stmt, 2, exp);
+    sqlite3_bind_text(stmt, 3, name.c_str(), -1, SQLITE_STATIC);
+
+    int result = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return result == SQLITE_DONE;
 }

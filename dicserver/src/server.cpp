@@ -1,6 +1,36 @@
 #include "server.hpp"  //服务器头文件
 #include "message.hpp" //消息协议头文件
-#include <myhead.h>
+#include <iostream>
+#include <string>
+#include <iomanip>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
+#include <errno.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <poll.h>
+#include <sys/epoll.h>
+#include <sys/un.h>
+#include <sys/sendfile.h>
+
+#include <sstream>
 #include <time.h> //有关时间的头文件
 #include <thread> //C++线程支持库
 using namespace std;
@@ -179,27 +209,40 @@ void Server::handleClient(int cfd, sockaddr_in client_addr)
 
         case S: // 查询
         {
-            // 执行查单词操作
-            string meaning; // 报错单词含义
-            if (db_manager_->querryWord(msg.text, meaning))
+            string meaning;
+            bool found = db_manager_->querryWord(msg.text, meaning);
+
+            if (found)
             {
-                // 成功找到，将单词和含义一起回复给客户端
-                snprintf(response.text, sizeof(response.text), "%s %s", msg.text, meaning.c_str());
+                string time_str = getCurrentTime();
+                db_manager_->recordHistory(msg.name, msg.text, meaning, time_str);
+
+                bool mastered = false;
+                db_manager_->isWordMastered(msg.name, msg.text, mastered);
+                int gain = mastered ? 1 : 10;
+
+                if (!mastered)
+                {
+                    db_manager_->setWordMastery(msg.name, msg.text, 1);
+                }
+
+                int level = 1;
+                int exp = 0;
+                bool level_up = false;
+                db_manager_->addUserExpAndLevel(msg.name, gain, level, exp, level_up);
+
+                string out = string(msg.text) + " " + meaning + " | LV " + to_string(level) + " EXP " + to_string(exp) + " (+" + to_string(gain) + ")";
+                if (level_up)
+                {
+                    out += " UP";
+                }
+                strncpy(response.text, out.c_str(), sizeof(response.text));
+                response.text[sizeof(response.text) - 1] = '\0';
             }
             else
             {
-                strcpy(response.text, "Not Found"); // 表示没找到
+                strcpy(response.text, "Not Found");
             }
-
-            // 保存查单词记录
-            time_t now = time(NULL);                                          // 获取当前系统时间对应的秒数
-            tm *local = localtime(&now);                                      // 将以秒数为单位的时间转变成时间的结构体
-            char time_str[20] = "";                                           // 保存当前系统时间的字符串
-            strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", local); // 将结构体中的年月日时分秒转变成格式串
-
-            // 调用历史查询记录
-            db_manager_->recordHistory(msg.name, msg.text, meaning, time_str);
-
             break;
         }
 
@@ -216,6 +259,24 @@ void Server::handleClient(int cfd, sockaddr_in client_addr)
             {
                 strcpy(response.text, "No history"); // 当前用户没有进行查单词操作
             }
+            break;
+        }
+
+        case P:
+        {
+            handle_get_pet_info(msg, response);
+            break;
+        }
+
+        case B:
+        {
+            handle_get_learn_word(msg, response);
+            break;
+        }
+
+        case M:
+        {
+            handle_submit_learn_result(msg, response);
             break;
         }
 
@@ -240,6 +301,86 @@ void Server::handleClient(int cfd, sockaddr_in client_addr)
     }
 
     close(cfd); // 关闭客户端套接字
+}
+
+void Server::handle_get_pet_info(const Msg &msg, Msg &response)
+{
+    int level = 1;
+    int exp = 0;
+    if (db_manager_->getPetInfo(msg.name, level, exp))
+    {
+        snprintf(response.text, sizeof(response.text), "LV %d EXP %d", level, exp);
+    }
+    else
+    {
+        strcpy(response.text, "**FAIL**");
+    }
+}
+
+void Server::handle_get_learn_word(const Msg &msg, Msg &response)
+{
+    string word;
+    string meaning;
+    if (db_manager_->getLearnWord(msg.name, word, meaning))
+    {
+        string out = word + " " + meaning;
+        strncpy(response.text, out.c_str(), sizeof(response.text));
+        response.text[sizeof(response.text) - 1] = '\0';
+    }
+    else
+    {
+        strcpy(response.text, "**EMPTY**");
+    }
+}
+
+void Server::handle_submit_learn_result(const Msg &msg, Msg &response)
+{
+    istringstream iss(msg.text);
+    string word;
+    int result = 0;
+    iss >> word >> result;
+    if (word.empty())
+    {
+        strcpy(response.text, "**FAIL**");
+        return;
+    }
+
+    string meaning;
+    if (!db_manager_->querryWord(word, meaning))
+    {
+        strcpy(response.text, "**FAIL**");
+        return;
+    }
+
+    bool mastered = false;
+    db_manager_->isWordMastered(msg.name, word, mastered);
+
+    int gain = 1;
+    if (result != 0)
+    {
+        gain = mastered ? 1 : 10;
+    }
+
+    string time_str = getCurrentTime();
+    db_manager_->recordHistory(msg.name, word, meaning, time_str);
+
+    if (result != 0 && !mastered)
+    {
+        db_manager_->setWordMastery(msg.name, word, 1);
+    }
+
+    int level = 1;
+    int exp = 0;
+    bool level_up = false;
+    db_manager_->addUserExpAndLevel(msg.name, gain, level, exp, level_up);
+
+    string out = "LV " + to_string(level) + " EXP " + to_string(exp) + " (+" + to_string(gain) + ")";
+    if (level_up)
+    {
+        out += " UP";
+    }
+    strncpy(response.text, out.c_str(), sizeof(response.text));
+    response.text[sizeof(response.text) - 1] = '\0';
 }
 
 // 获取当前系统时间的静态成员函数

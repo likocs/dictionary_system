@@ -1,7 +1,36 @@
 #ifndef DATABASE_MANAGER_H
 #define DATABASE_MANAGER_H
 
-#include <myhead.h>
+#include <iostream>
+#include <string>
+#include <iomanip>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
+#include <errno.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <poll.h>
+#include <sys/epoll.h>
+#include <sys/un.h>
+#include <sys/sendfile.h>
+
 #include <sqlite3.h> //数据库的头文件
 #include <string>    //字符串头文件
 #include <mutex>     //互斥锁头文件
@@ -26,6 +55,11 @@ public:
     bool querryWord(const string &word, string &meaning);                                                  // 查询单词
     bool recordHistory(const string &name, const string &word, const string &meaning, const string &time); // 历史记录
     bool getHistory(const string name, string &history);
+    bool isWordMastered(const string &name, const string &word, bool &mastered);
+    bool setWordMastery(const string &name, const string &word, int mastery);
+    bool addUserExpAndLevel(const string &name, int exp_gain, int &level, int &exp, bool &level_up);
+    bool getPetInfo(const string &name, int &level, int &exp);
+    bool getLearnWord(const string &name, string &word, string &meaning);
 
 private:
     sqlite3 *usr_db_;  // 用户数据库指针
@@ -40,6 +74,8 @@ private:
 
     // 执行sql语句的函数
     bool executeSQL(sqlite3 *db, const string &sql, char **errmsg = NULL);
+
+    bool ensureColumnExists(sqlite3 *db, const string &table, const string &column, const string &ddl);
 };
 
 #endif

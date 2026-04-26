@@ -1,7 +1,36 @@
 #ifndef MESSAGE_HPP
 #define MESSAGE_HPP
 
-#include <myhead.h>
+#include <iostream>
+#include <string>
+#include <iomanip>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
+#include <errno.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <poll.h>
+#include <sys/epoll.h>
+#include <sys/un.h>
+#include <sys/sendfile.h>
+
 using namespace std;
 // 操作类型的定义
 #define R 1 // 用户注册
