@@ -28,6 +28,8 @@
 #include <sys/epoll.h>
 #include <sys/un.h>
 #include <sys/sendfile.h>
+#include <sstream>
+#include <cstdint>
 
 using namespace std;
 // 主程序循环
@@ -90,7 +92,9 @@ void DictClient::showUserMenu()
         cout << "*********************************" << endl;
         cout << "**********1、查单词***************" << endl;
         cout << "**********2、历史记录***************" << endl;
-        cout << "**********3、返回上一级***************" << endl;
+        cout << "**********3、背单词***************" << endl;
+        cout << "**********4、等级/经验***************" << endl;
+        cout << "**********5、返回上一级***************" << endl;
         cout << "*********************************" << endl;
         cout << "请选择：";
 
@@ -110,6 +114,14 @@ void DictClient::showUserMenu()
             break;
 
         case 3:
+            doLearn();
+            break;
+
+        case 4:
+            doPetInfo();
+            break;
+
+        case 5:
             doQuit(); // 调用查单词函数
             break;
 
@@ -121,6 +133,157 @@ void DictClient::showUserMenu()
         cout << "按回车继续...." << endl;
         cin.get();
     }
+}
+
+void DictClient::doLearn()
+{
+    while (true)
+    {
+        Msg req;
+        req.type = B;
+        strcpy(req.name, username_.c_str());
+        req.text[0] = '\0';
+
+        req.networkByteOrder();
+        if (send(sockfd_, &req, sizeof(req), 0) < 0)
+        {
+            perror("发送背单词请求失败");
+            return;
+        }
+
+        Msg resp;
+        if (recv(sockfd_, &resp, sizeof(resp), 0) <= 0)
+        {
+            perror("接收背单词响应失败");
+            return;
+        }
+        resp.hostByteOrder();
+
+        if (resp.type == D)
+        {
+            string payload(resp.text);
+            istringstream iss(payload);
+            uint32_t quiz_id = 0;
+            iss >> quiz_id;
+            string meaning;
+            getline(iss, meaning);
+            if (!meaning.empty() && meaning[0] == ' ')
+            {
+                meaning.erase(meaning.begin());
+            }
+
+            cout << "默写模式（输入#退出）" << endl;
+            cout << "释义：" << meaning << endl;
+            cout << "请输入单词：";
+            string spelling;
+            getline(cin, spelling);
+            if (spelling == "#")
+            {
+                return;
+            }
+
+            Msg submit;
+            submit.type = N;
+            strcpy(submit.name, username_.c_str());
+            string text = to_string(quiz_id) + " " + spelling;
+            strncpy(submit.text, text.c_str(), sizeof(submit.text));
+            submit.text[sizeof(submit.text) - 1] = '\0';
+
+            submit.networkByteOrder();
+            if (send(sockfd_, &submit, sizeof(submit), 0) < 0)
+            {
+                perror("发送默写提交失败");
+                return;
+            }
+
+            if (recv(sockfd_, &resp, sizeof(resp), 0) <= 0)
+            {
+                perror("接收默写结果失败");
+                return;
+            }
+            resp.hostByteOrder();
+            cout << resp.text << endl;
+            cout << "按回车继续...." << endl;
+            cin.get();
+            continue;
+        }
+
+        if (strcmp(resp.text, "**EMPTY**") == 0)
+        {
+            cout << "暂无可学习单词" << endl;
+            return;
+        }
+
+        string payload(resp.text);
+        istringstream iss(payload);
+        string word;
+        iss >> word;
+        string meaning;
+        getline(iss, meaning);
+        if (!meaning.empty() && meaning[0] == ' ')
+        {
+            meaning.erase(meaning.begin());
+        }
+
+        cout << "背单词模式（输入#退出）" << endl;
+        cout << "单词：" << word << endl;
+        cout << "释义：" << meaning << endl;
+        cout << "是否记住？(1/0/#):";
+        string input;
+        getline(cin, input);
+        if (input == "#")
+        {
+            return;
+        }
+
+        int remembered = (input == "1" || input == "y" || input == "Y") ? 1 : 0;
+        Msg submit;
+        submit.type = M;
+        strcpy(submit.name, username_.c_str());
+        string text = word + " " + to_string(remembered);
+        strncpy(submit.text, text.c_str(), sizeof(submit.text));
+        submit.text[sizeof(submit.text) - 1] = '\0';
+
+        submit.networkByteOrder();
+        if (send(sockfd_, &submit, sizeof(submit), 0) < 0)
+        {
+            perror("发送背单词提交失败");
+            return;
+        }
+
+        if (recv(sockfd_, &resp, sizeof(resp), 0) <= 0)
+        {
+            perror("接收背单词提交响应失败");
+            return;
+        }
+        resp.hostByteOrder();
+        cout << resp.text << endl;
+        cout << "按回车继续...." << endl;
+        cin.get();
+    }
+}
+
+void DictClient::doPetInfo()
+{
+    Msg msg;
+    msg.type = P;
+    strcpy(msg.name, username_.c_str());
+    msg.text[0] = '\0';
+
+    msg.networkByteOrder();
+    if (send(sockfd_, &msg, sizeof(msg), 0) < 0)
+    {
+        perror("发送等级/经验请求失败");
+        return;
+    }
+
+    if (recv(sockfd_, &msg, sizeof(msg), 0) <= 0)
+    {
+        perror("接收等级/经验响应失败");
+        return;
+    }
+    msg.hostByteOrder();
+    cout << msg.text << endl;
 }
 
 // 用户注册函数

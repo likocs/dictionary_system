@@ -25,6 +25,8 @@ private:
     bool doLogin();      // 登录功能
     void doQuerry();     // 查询功能
     void doHistory();    // 获取历史记录功能
+    void doLearn();      // 背单词功能
+    void doPetInfo();    // 等级/经验
     void doQuit();       // 退出功能
 };
 

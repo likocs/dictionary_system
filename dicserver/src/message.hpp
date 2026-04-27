@@ -41,6 +41,8 @@ using namespace std;
 #define P 6
 #define B 7
 #define M 8
+#define D 9
+#define N 10
 
 // 定义客户端与服务器进行数据通信的协议
 struct Msg

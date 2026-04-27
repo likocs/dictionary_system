@@ -31,9 +31,43 @@
 #include <sys/sendfile.h>
 
 #include <sstream>
+#include <unordered_map>
+#include <vector>
+#include <random>
+#include <algorithm>
+#include <cctype>
 #include <time.h> //有关时间的头文件
 #include <thread> //C++线程支持库
 using namespace std;
+
+namespace
+{
+    struct DictationState
+    {
+        uint32_t id = 0;
+        string word;
+        string meaning;
+        bool active = false;
+    };
+
+    struct LearnSessionState
+    {
+        uint32_t next_dictation_id = 1;
+        int correct_learn_count = 0;
+        vector<string> last_correct_words;
+        DictationState dictation;
+    };
+
+    unordered_map<string, LearnSessionState> learn_state_by_user;
+    mutex learn_state_mutex;
+
+    string toLowerCopy(string s)
+    {
+        transform(s.begin(), s.end(), s.begin(), [](unsigned char c)
+                  { return static_cast<char>(tolower(c)); });
+        return s;
+    }
+}
 /*
     服务器的构造函数：完成套接字的创建、端口号快速重用、绑定ip和端口号
 */
@@ -203,6 +237,10 @@ void Server::handleClient(int cfd, sockaddr_in client_addr)
         {
             // 执行退出操作
             db_manager_->logoutUser(msg.name);
+            {
+                lock_guard<mutex> lock(learn_state_mutex);
+                learn_state_by_user.erase(string(msg.name));
+            }
             close(cfd);
             break;
         }
@@ -270,6 +308,20 @@ void Server::handleClient(int cfd, sockaddr_in client_addr)
 
         case B:
         {
+            bool has_dictation = false;
+            {
+                lock_guard<mutex> lock(learn_state_mutex);
+                auto it = learn_state_by_user.find(string(msg.name));
+                has_dictation = (it != learn_state_by_user.end() && it->second.dictation.active);
+            }
+
+            if (has_dictation)
+            {
+                response.type = D;
+                handle_get_dictation(msg, response);
+                break;
+            }
+
             handle_get_learn_word(msg, response);
             break;
         }
@@ -277,6 +329,80 @@ void Server::handleClient(int cfd, sockaddr_in client_addr)
         case M:
         {
             handle_submit_learn_result(msg, response);
+
+            istringstream iss(msg.text);
+            string word;
+            int result = 0;
+            iss >> word >> result;
+
+            string username(msg.name);
+            if (!username.empty() && !word.empty() && result != 0)
+            {
+                string picked_word;
+
+                {
+                    lock_guard<mutex> lock(learn_state_mutex);
+                    auto &st = learn_state_by_user[username];
+                    if (st.last_correct_words.capacity() == 0)
+                    {
+                        st.last_correct_words.reserve(10);
+                    }
+                    st.correct_learn_count += 1;
+                    st.last_correct_words.push_back(word);
+                    if (static_cast<int>(st.last_correct_words.size()) > 10)
+                    {
+                        st.last_correct_words.erase(st.last_correct_words.begin());
+                    }
+
+                    if (!st.dictation.active && st.correct_learn_count >= 10 && st.last_correct_words.size() >= 10)
+                    {
+                        std::mt19937 rng(static_cast<uint32_t>(time(NULL)) ^ static_cast<uint32_t>(getpid()) ^ st.next_dictation_id);
+                        std::uniform_int_distribution<size_t> dist(0, st.last_correct_words.size() - 1);
+                        picked_word = st.last_correct_words[dist(rng)];
+                    }
+                }
+
+                string meaning;
+                if (!picked_word.empty() && db_manager_->querryWord(picked_word, meaning))
+                {
+                    bool activated = false;
+                    {
+                        lock_guard<mutex> lock(learn_state_mutex);
+                        auto &st = learn_state_by_user[username];
+                        if (!st.dictation.active && st.correct_learn_count >= 10 && st.last_correct_words.size() >= 10)
+                        {
+                            st.dictation.active = true;
+                            st.dictation.id = st.next_dictation_id++;
+                            st.dictation.word = picked_word;
+                            st.dictation.meaning = meaning;
+
+                            st.correct_learn_count = 0;
+                            st.last_correct_words.clear();
+                            activated = true;
+                        }
+                    }
+
+                    if (activated)
+                    {
+                        string out = string(response.text);
+                        out += " | DICT_READY";
+                        strncpy(response.text, out.c_str(), sizeof(response.text));
+                        response.text[sizeof(response.text) - 1] = '\0';
+                    }
+                }
+            }
+            break;
+        }
+
+        case D:
+        {
+            handle_get_dictation(msg, response);
+            break;
+        }
+
+        case N:
+        {
+            handle_submit_dictation(msg, response);
             break;
         }
 
@@ -375,6 +501,93 @@ void Server::handle_submit_learn_result(const Msg &msg, Msg &response)
     db_manager_->addUserExpAndLevel(msg.name, gain, level, exp, level_up);
 
     string out = "LV " + to_string(level) + " EXP " + to_string(exp) + " (+" + to_string(gain) + ")";
+    if (level_up)
+    {
+        out += " UP";
+    }
+    strncpy(response.text, out.c_str(), sizeof(response.text));
+    response.text[sizeof(response.text) - 1] = '\0';
+}
+
+void Server::handle_get_dictation(const Msg &msg, Msg &response)
+{
+    string username(msg.name);
+    if (username.empty())
+    {
+        strcpy(response.text, "**FAIL**");
+        return;
+    }
+
+    lock_guard<mutex> lock(learn_state_mutex);
+    auto it = learn_state_by_user.find(username);
+    if (it == learn_state_by_user.end() || !it->second.dictation.active)
+    {
+        strcpy(response.text, "**NONE**");
+        return;
+    }
+
+    string out = to_string(it->second.dictation.id) + " " + it->second.dictation.meaning;
+    strncpy(response.text, out.c_str(), sizeof(response.text));
+    response.text[sizeof(response.text) - 1] = '\0';
+}
+
+void Server::handle_submit_dictation(const Msg &msg, Msg &response)
+{
+    string username(msg.name);
+    if (username.empty())
+    {
+        strcpy(response.text, "**FAIL**");
+        return;
+    }
+
+    istringstream iss(msg.text);
+    uint32_t id = 0;
+    string spelling;
+    iss >> id;
+    getline(iss, spelling);
+    if (!spelling.empty() && spelling[0] == ' ')
+    {
+        spelling.erase(spelling.begin());
+    }
+
+    if (id == 0 || spelling.empty())
+    {
+        strcpy(response.text, "**FAIL**");
+        return;
+    }
+
+    bool correct = false;
+    string answer_word;
+
+    {
+        lock_guard<mutex> lock(learn_state_mutex);
+        auto it = learn_state_by_user.find(username);
+        if (it == learn_state_by_user.end() || !it->second.dictation.active || it->second.dictation.id != id)
+        {
+            strcpy(response.text, "**NONE**");
+            return;
+        }
+
+        answer_word = it->second.dictation.word;
+        correct = (toLowerCopy(spelling) == toLowerCopy(answer_word));
+        it->second.dictation.active = false;
+        it->second.dictation.word.clear();
+        it->second.dictation.meaning.clear();
+        it->second.dictation.id = 0;
+    }
+
+    int gain = correct ? 5 : 1;
+    int level = 1;
+    int exp = 0;
+    bool level_up = false;
+    if (!db_manager_->addUserExpAndLevel(username, gain, level, exp, level_up))
+    {
+        strcpy(response.text, "**FAIL**");
+        return;
+    }
+
+    string out = correct ? "DICT OK" : ("DICT FAIL ans=" + answer_word);
+    out += " | LV " + to_string(level) + " EXP " + to_string(exp) + " (+" + to_string(gain) + ")";
     if (level_up)
     {
         out += " UP";

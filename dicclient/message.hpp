@@ -38,6 +38,11 @@ using namespace std;
 #define Q 3 // 用户退出
 #define S 4 // 单词查询
 #define H 5 // 历史记录
+#define P 6
+#define B 7
+#define M 8
+#define D 9
+#define N 10
 
 // 定义客户端与服务器进行数据通信的协议
 struct Msg

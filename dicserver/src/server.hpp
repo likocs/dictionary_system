@@ -60,6 +60,8 @@ private:
     void handle_get_pet_info(const Msg &msg, Msg &response);
     void handle_get_learn_word(const Msg &msg, Msg &response);
     void handle_submit_learn_result(const Msg &msg, Msg &response);
+    void handle_get_dictation(const Msg &msg, Msg &response);
+    void handle_submit_dictation(const Msg &msg, Msg &response);
 
     // 提供一个获取当前系统时间的函数
     static string getCurrentTime();

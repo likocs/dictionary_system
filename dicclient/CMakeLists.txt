@@ -4,6 +4,7 @@ project(dict_client)
 # 设置C++标准
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 查找SQLite3（客户端可能不需要，但保留给未来扩展）
 find_package(SQLite3)
