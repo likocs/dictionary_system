@@ -42,12 +42,18 @@ using namespace std;
 
 namespace
 {
-    struct DictationState
+    struct DictationItem
     {
         uint32_t id = 0;
         string word;
         string meaning;
+    };
+
+    struct DictationState
+    {
         bool active = false;
+        size_t index = 0;
+        vector<DictationItem> items;
     };
 
     struct LearnSessionState
@@ -336,10 +342,9 @@ void Server::handleClient(int cfd, sockaddr_in client_addr)
             iss >> word >> result;
 
             string username(msg.name);
+            vector<string> snapshot_words;
             if (!username.empty() && !word.empty() && result != 0)
             {
-                string picked_word;
-
                 {
                     lock_guard<mutex> lock(learn_state_mutex);
                     auto &st = learn_state_by_user[username];
@@ -356,14 +361,31 @@ void Server::handleClient(int cfd, sockaddr_in client_addr)
 
                     if (!st.dictation.active && st.correct_learn_count >= 10 && st.last_correct_words.size() >= 10)
                     {
-                        std::mt19937 rng(static_cast<uint32_t>(time(NULL)) ^ static_cast<uint32_t>(getpid()) ^ st.next_dictation_id);
-                        std::uniform_int_distribution<size_t> dist(0, st.last_correct_words.size() - 1);
-                        picked_word = st.last_correct_words[dist(rng)];
+                        snapshot_words = st.last_correct_words;
                     }
                 }
 
-                string meaning;
-                if (!picked_word.empty() && db_manager_->querryWord(picked_word, meaning))
+                vector<pair<string, string>> word_meanings;
+                if (snapshot_words.size() >= 10)
+                {
+                    std::mt19937 rng(static_cast<uint32_t>(time(NULL)) ^ static_cast<uint32_t>(getpid()));
+                    std::shuffle(snapshot_words.begin(), snapshot_words.end(), rng);
+                    snapshot_words.resize(10);
+
+                    word_meanings.reserve(10);
+                    for (const string &w : snapshot_words)
+                    {
+                        string meaning;
+                        if (!db_manager_->querryWord(w, meaning))
+                        {
+                            word_meanings.clear();
+                            break;
+                        }
+                        word_meanings.push_back({w, meaning});
+                    }
+                }
+
+                if (word_meanings.size() == 10)
                 {
                     bool activated = false;
                     {
@@ -372,9 +394,17 @@ void Server::handleClient(int cfd, sockaddr_in client_addr)
                         if (!st.dictation.active && st.correct_learn_count >= 10 && st.last_correct_words.size() >= 10)
                         {
                             st.dictation.active = true;
-                            st.dictation.id = st.next_dictation_id++;
-                            st.dictation.word = picked_word;
-                            st.dictation.meaning = meaning;
+                            st.dictation.index = 0;
+                            st.dictation.items.clear();
+                            st.dictation.items.reserve(word_meanings.size());
+                            for (const auto &wm : word_meanings)
+                            {
+                                DictationItem item;
+                                item.id = st.next_dictation_id++;
+                                item.word = wm.first;
+                                item.meaning = wm.second;
+                                st.dictation.items.push_back(item);
+                            }
 
                             st.correct_learn_count = 0;
                             st.last_correct_words.clear();
@@ -520,13 +550,14 @@ void Server::handle_get_dictation(const Msg &msg, Msg &response)
 
     lock_guard<mutex> lock(learn_state_mutex);
     auto it = learn_state_by_user.find(username);
-    if (it == learn_state_by_user.end() || !it->second.dictation.active)
+    if (it == learn_state_by_user.end() || !it->second.dictation.active || it->second.dictation.index >= it->second.dictation.items.size())
     {
         strcpy(response.text, "**NONE**");
         return;
     }
 
-    string out = to_string(it->second.dictation.id) + " " + it->second.dictation.meaning;
+    const auto &cur = it->second.dictation.items[it->second.dictation.index];
+    string out = to_string(cur.id) + " " + cur.meaning;
     strncpy(response.text, out.c_str(), sizeof(response.text));
     response.text[sizeof(response.text) - 1] = '\0';
 }
@@ -562,18 +593,29 @@ void Server::handle_submit_dictation(const Msg &msg, Msg &response)
     {
         lock_guard<mutex> lock(learn_state_mutex);
         auto it = learn_state_by_user.find(username);
-        if (it == learn_state_by_user.end() || !it->second.dictation.active || it->second.dictation.id != id)
+        if (it == learn_state_by_user.end() || !it->second.dictation.active || it->second.dictation.index >= it->second.dictation.items.size())
         {
             strcpy(response.text, "**NONE**");
             return;
         }
 
-        answer_word = it->second.dictation.word;
+        const auto &cur = it->second.dictation.items[it->second.dictation.index];
+        if (cur.id != id)
+        {
+            strcpy(response.text, "**NONE**");
+            return;
+        }
+
+        answer_word = cur.word;
         correct = (toLowerCopy(spelling) == toLowerCopy(answer_word));
-        it->second.dictation.active = false;
-        it->second.dictation.word.clear();
-        it->second.dictation.meaning.clear();
-        it->second.dictation.id = 0;
+
+        it->second.dictation.index += 1;
+        if (it->second.dictation.index >= it->second.dictation.items.size())
+        {
+            it->second.dictation.active = false;
+            it->second.dictation.index = 0;
+            it->second.dictation.items.clear();
+        }
     }
 
     int gain = correct ? 5 : 1;
